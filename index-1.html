@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="bn">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Crypto Long Scanner</title>
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0;background:#0b1020;color:#eef2ff}
+.wrap{max-width:720px;margin:auto;padding:20px}
+.card{background:#151c31;border:1px solid #293454;border-radius:18px;padding:18px;margin:12px 0}
+h1{font-size:24px;margin:0 0 6px}.muted{color:#9aa6c2}
+.row{display:flex;gap:10px}.row>*{flex:1}
+input,button{width:100%;box-sizing:border-box;padding:14px;border-radius:12px;border:1px solid #394562;font-size:16px}
+input{background:#0e1528;color:white}button{background:#3b82f6;color:white;border:0;font-weight:700}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.metric{background:#0e1528;padding:12px;border-radius:12px}.metric b{display:block;font-size:18px;margin-top:4px}
+.score{font-size:42px;font-weight:800}.signal{font-size:22px;font-weight:800}
+.good{color:#4ade80}.warn{color:#facc15}.bad{color:#fb7185}
+table{width:100%;border-collapse:collapse}td,th{padding:9px;border-bottom:1px solid #293454;text-align:left}
+small{color:#8f9ab4}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>📈 Crypto LONG Scanner</h1>
+    <div class="muted">শুধু Coin/USDT perpetual symbol লিখুন — যেমন BTC, ETH, HEMU</div>
+    <div class="row" style="margin-top:14px">
+      <input id="coin" value="BTC" placeholder="BTC / ETH / HEMU">
+      <button id="scan">SCAN</button>
+    </div>
+    <div id="status" class="muted" style="margin-top:10px"></div>
+  </div>
+  <div id="result"></div>
+</div>
+<script>
+const BASE="https://fapi.binance.com";
+const $=id=>document.getElementById(id);
+const pct=(a,b)=>b?((a/b)-1)*100:0;
+const fmt=x=>Number.isFinite(x)?(x>=0?"+":"")+x.toFixed(2)+"%":"—";
+async function get(path, params={}){
+  const u=new URL(BASE+path);
+  Object.entries(params).forEach(([k,v])=>u.searchParams.set(k,v));
+  const r=await fetch(u); if(!r.ok) throw new Error("API error "+r.status);
+  return r.json();
+}
+function scorePrice(x){
+  return (x.p1>=2?10:x.p1>=1?5:0)+(x.p4>=6?10:x.p4>=4?5:0)+(x.p24>=15?10:x.p24>=10?5:0);
+}
+function scoreOI(x){
+  return (x.o1>=2?10:x.o1>=1?5:0)+(x.o4>=6?10:x.o4>=4?5:0)+(x.o24>=15?10:x.o24>=10?5:0);
+}
+function scoreVol(v){return v>=2?15:v>=1.5?10:v>=1.2?5:0}
+function scoreFunding(f){
+  if(f<0)return 0;
+  if(f<=0.01)return 10;
+  if(f<=0.03)return 7;
+  if(f<=0.05)return 3;
+  return 0;
+}
+function scoreRSI(r){return r>=50&&r<=60?10:r<70?8:r<75?4:0}
+function rsi(closes,n=14){
+  if(closes.length<n+1)return NaN;
+  let g=0,l=0;
+  for(let i=1;i<=n;i++){let d=closes[i]-closes[i-1];g+=Math.max(d,0);l+=Math.max(-d,0)}
+  let ag=g/n,al=l/n;
+  for(let i=n+1;i<closes.length;i++){
+    let d=closes[i]-closes[i-1];
+    ag=(ag*(n-1)+Math.max(d,0))/n; al=(al*(n-1)+Math.max(-d,0))/n;
+  }
+  return al===0?100:100-(100/(1+ag/al));
+}
+async function scan(){
+  const raw=$("coin").value.trim().toUpperCase().replace(/[^A-Z0-9]/g,"");
+  if(!raw){$("status").textContent="Coin লিখুন।";return}
+  const symbol=raw.endsWith("USDT")?raw:raw+"USDT";
+  $("status").textContent="Live Binance Futures data নেওয়া হচ্ছে…";
+  $("result").innerHTML="";
+  try{
+    const [ticker, k1, k4, k24, oi1, oi4, oi24, fund, k20d, liq] = await Promise.all([
+      get("/fapi/v1/ticker/24hr",{symbol}),
+      get("/fapi/v1/klines",{symbol,interval:"1h",limit:30}),
+      get("/fapi/v1/klines",{symbol,interval:"4h",limit:8}),
+      get("/fapi/v1/klines",{symbol,interval:"1d",limit:2}),
+      get("/futures/data/openInterestHist",{symbol,period:"1h",limit:2}),
+      get("/futures/data/openInterestHist",{symbol,period:"4h",limit:2}),
+      get("/futures/data/openInterestHist",{symbol,period:"1d",limit:2}),
+      get("/fapi/v1/fundingRate",{symbol,limit:1}),
+      get("/fapi/v1/klines",{symbol,interval:"1d",limit:21}),
+      get("/fapi/v1/allForceOrders",{symbol,limit:100})
+    ]);
+    const price=+ticker.lastPrice;
+    const p1=pct(price,+k1[k1.length-2][4]);
+    const p4=pct(price,+k4[k4.length-2][4]);
+    const p24=+ticker.priceChangePercent;
+    const oiVal=a=>+(a?.[0]?.sumOpenInterestValue||0);
+    const o1=pct(oiVal(oi1.slice(-1)),oiVal(oi1.slice(-2,-1)));
+    const o4=pct(oiVal(oi4.slice(-1)),oiVal(oi4.slice(-2,-1)));
+    const o24=pct(oiVal(oi24.slice(-1)),oiVal(oi24.slice(-2,-1)));
+    const vols=k20d.slice(0,-1).map(x=>+x[7]);
+    const avg=vols.reduce((a,b)=>a+b,0)/Math.max(1,vols.length);
+    const volRatio=(+ticker.quoteVolume)/avg;
+    const funding=(+(fund?.[0]?.fundingRate||0))*100;
+    const closes=k1.map(x=>+x[4]);
+    const r=rsi(closes);
+    const ps=scorePrice({p1,p4,p24}), os=scoreOI({o1,o4,o24}), vs=scoreVol(volRatio), fs=scoreFunding(funding), rs=scoreRSI(r);
+    const shortLiq=liq.filter(x=>x.side==="SELL").reduce((s,x)=>s+(+x.origQty)*(+x.price),0);
+    const longLiq=liq.filter(x=>x.side==="BUY").reduce((s,x)=>s+(+x.origQty)*(+x.price),0);
+    let liqScore=2;
+    if(shortLiq>longLiq*1.5 && o1>0) liqScore=5;
+    else if(longLiq>shortLiq*1.5) liqScore=0;
+    const rawScore=ps+os+vs+fs+rs+liqScore;
+    const total=Math.min(100,rawScore);
+    let signal=total>=85?"🔥 STRONG LONG":total>=75?"🟢 LONG CANDIDATE":total>=65?"🟡 WAIT":"🔴 AVOID";
+    if(p24>50)signal="🔴 AVOID — 24H PUMP >50%";
+    else if(p24>30 && total>=65)signal="🟡 WAIT — 24H PUMP >30%";
+    const cls=signal.includes("LONG")&&!signal.includes("WAIT")?"good":signal.includes("WAIT")?"warn":"bad";
+    $("status").textContent="Last update: "+new Date().toLocaleString();
+    $("result").innerHTML=`
+      <div class="card">
+        <div class="muted">${symbol} • Binance USDⓈ-M Perpetual</div>
+        <div style="font-size:30px;font-weight:800;margin-top:6px">$${price}</div>
+        <div class="score">${total}/100</div>
+        <div class="signal ${cls}">${signal}</div>
+      </div>
+      <div class="card">
+        <div class="grid">
+          <div class="metric">Price 1H<b>${fmt(p1)}</b></div>
+          <div class="metric">Price 4H<b>${fmt(p4)}</b></div>
+          <div class="metric">Price 24H<b>${fmt(p24)}</b></div>
+          <div class="metric">OI 1H<b>${fmt(o1)}</b></div>
+          <div class="metric">OI 4H<b>${fmt(o4)}</b></div>
+          <div class="metric">OI 24H<b>${fmt(o24)}</b></div>
+          <div class="metric">Volume<b>${volRatio.toFixed(2)}×</b></div>
+          <div class="metric">Funding<b>${funding.toFixed(4)}%</b></div>
+          <div class="metric">RSI(1H)<b>${Number.isFinite(r)?r.toFixed(1):"—"}</b></div>
+        </div>
+      </div>
+      <div class="card">
+        <table>
+          <tr><th>Component</th><th>Points</th></tr>
+          <tr><td>Price momentum</td><td>${ps}/30</td></tr>
+          <tr><td>Open Interest</td><td>${os}/30</td></tr>
+          <tr><td>Volume</td><td>${vs}/15</td></tr>
+          <tr><td>Funding</td><td>${fs}/10</td></tr>
+          <tr><td>RSI</td><td>${rs}/10</td></tr>
+          <tr><td>Liquidation confirmation</td><td>${liqScore}/5</td></tr>
+        </table>
+        <small>স্ক্যানটি screening tool; Futures-এ নিশ্চিত লাভের signal নয়।</small>
+      </div>`;
+  }catch(e){
+    $("status").innerHTML='<span class="bad">ডেটা পাওয়া যায়নি। Symbol ঠিক আছে কিনা দেখুন (যেমন BTC, ETH, HEMU)।</span>';
+    $("result").innerHTML="";
+    console.error(e);
+  }
+}
+$("scan").addEventListener("click",scan);
+$("coin").addEventListener("keydown",e=>{if(e.key==="Enter")scan()});
+</script>
+</body>
+</html>
